@@ -1,0 +1,12 @@
+node_modules
+dist
+.firebase
+.env
+.env.*
+!.env.example
+firebase-debug.log
+*.log
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.DS_Store
