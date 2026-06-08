@@ -106,6 +106,24 @@ function App() {
     }
   }
 
+  async function rerunChannel(channel: Channel) {
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.rerunChannel(channel.id);
+      setChannels((current) =>
+        current.map((item) => (item.id === channel.id ? result.channel : item)),
+      );
+      setMessage(
+        result.outcome === "processed"
+          ? `${channel.title}'s latest video was rerun and sent to Telegram.`
+          : `${channel.title}'s rerun status: ${result.outcome}.`,
+      );
+    } catch (caught) {
+      setError(getError(caught));
+    }
+  }
+
   async function removeSubscriber(subscriber: TelegramSubscriber) {
     const name = subscriber.username
       ? `@${subscriber.username}`
@@ -248,6 +266,7 @@ function App() {
                   key={channel.id}
                   channel={channel}
                   onDelete={removeChannel}
+                  onRerun={rerunChannel}
                   onToggle={toggleChannel}
                 />
               ))}
@@ -597,12 +616,25 @@ function Stats({ channels }: { channels: Channel[] }) {
 function ChannelCard({
   channel,
   onDelete,
+  onRerun,
   onToggle,
 }: {
   channel: Channel;
   onDelete: (id: string) => Promise<void>;
+  onRerun: (channel: Channel) => Promise<void>;
   onToggle: (channel: Channel) => Promise<void>;
 }) {
+  const [rerunning, setRerunning] = useState(false);
+
+  async function rerun() {
+    setRerunning(true);
+    try {
+      await onRerun(channel);
+    } finally {
+      setRerunning(false);
+    }
+  }
+
   return (
     <article className={`channel-card ${channel.active ? "" : "paused"}`}>
       <div className="channel-identity">
@@ -642,6 +674,14 @@ function ChannelCard({
       </div>
 
       <div className="card-actions">
+        <button
+          className="button secondary"
+          disabled={rerunning}
+          onClick={() => void rerun()}
+        >
+          <RefreshCw size={16} className={rerunning ? "spin" : ""} />
+          {rerunning ? "Rerunning..." : "Repull + rerun"}
+        </button>
         <button className="button ghost" onClick={() => void onToggle(channel)}>
           {channel.active ? "Pause" : "Resume"}
         </button>

@@ -7,6 +7,7 @@ import { db } from "./firebase.js";
 import {
   pollChannels,
   processLatestVideo,
+  rerunLatestVideo,
   retryTranscript,
 } from "./pipeline.js";
 import type { Channel } from "./types.js";
@@ -156,6 +157,30 @@ apiRouter.patch("/channels/:id", requireUser, async (request, response) => {
   );
   const updated = await reference.get();
   response.json({ channel: serialize(updated.id, updated.data() || {}) });
+});
+
+apiRouter.post("/channels/:id/rerun", requireUser, async (request, response) => {
+  const channelId = routeParameter(request.params.id);
+  const reference = db.collection("channels").doc(channelId);
+  const snapshot = await reference.get();
+  if (!snapshot.exists) {
+    response.status(404).json({ error: "Channel not found" });
+    return;
+  }
+
+  const channel = snapshot.data() as Channel;
+  const latestVideo = (await getChannelFeed(channel.channelId))[0];
+  if (!latestVideo) {
+    response.status(404).json({ error: "No videos found for this channel" });
+    return;
+  }
+
+  const outcome = await rerunLatestVideo(channelId, channel, latestVideo);
+  const updated = await reference.get();
+  response.json({
+    outcome,
+    channel: serialize(updated.id, updated.data() || {}),
+  });
 });
 
 apiRouter.delete("/channels/:id", requireUser, async (request, response) => {

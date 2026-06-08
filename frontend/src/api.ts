@@ -69,6 +69,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+  rerunChannel: (id: string) =>
+    request<{ channel: Channel; outcome: string }>(`/channels/${id}/rerun`, {
+      method: "POST",
+    }),
   deleteChannel: (id: string) =>
     request<{ ok: true }>(`/channels/${id}`, { method: "DELETE" }),
   runPoll: () =>

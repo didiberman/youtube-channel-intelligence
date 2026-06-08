@@ -11,6 +11,7 @@ to Telegram subscribers.
 - Firebase Hosting control panel with password authentication.
 - Add channels by name, `@handle`, channel ID, or URL.
 - Analyze the latest video immediately when a channel is added.
+- Repull and rerun any channel's latest video from its dashboard card.
 - Poll active channel RSS feeds every three hours.
 - Retry unavailable captions through Cloud Tasks after two hours.
 - Select a global OpenRouter model and analysis prompt from the GUI.

@@ -81,6 +81,32 @@ export async function processLatestVideo(
   );
 }
 
+export async function rerunLatestVideo(
+  channelDocumentId: string,
+  channel: Channel,
+  video: Video,
+) {
+  await db
+    .collection("channels")
+    .doc(channelDocumentId)
+    .collection("videos")
+    .doc(video.videoId)
+    .set(
+      {
+        status: "rerun_requested",
+        rerunRequestedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  return processVideo(
+    channelDocumentId,
+    channel,
+    video,
+    await getGlobalSettings(),
+  );
+}
+
 async function processVideo(
   channelDocumentId: string,
   channel: Channel,
