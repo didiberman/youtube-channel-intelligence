@@ -34,7 +34,7 @@ steps:
       - --memory=1Gi
       - --service-account=youtube-monitor-runtime@$PROJECT_ID.iam.gserviceaccount.com
       - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,SCHEDULER_SERVICE_ACCOUNT=${_SCHEDULER_SERVICE_ACCOUNT},TASKS_QUEUE=transcript-retries,TASKS_LOCATION=${_REGION}
-      - --set-secrets=YOUTUBE_API_KEY=youtube-api-key:latest,SUPADATA_API_KEY=supadata-api-key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,TELEGRAM_WEBHOOK_SECRET=telegram-webhook-secret:latest,TELEGRAM_SUBSCRIBE_PASSWORD=telegram-subscribe-password:latest,OPENROUTER_API_KEY=openrouter-api-key:latest,ADMIN_PASSWORD=admin-password:latest,SCHEDULER_AUDIENCE=scheduler-audience:latest
+      - --set-secrets=YOUTUBE_API_KEY=youtube-api-key:latest,APIFY_API_KEY=apify_key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,TELEGRAM_WEBHOOK_SECRET=telegram-webhook-secret:latest,TELEGRAM_SUBSCRIBE_PASSWORD=telegram-subscribe-password:latest,OPENROUTER_API_KEY=openrouter-api-key:latest,ADMIN_PASSWORD=admin-password:latest,SCHEDULER_AUDIENCE=scheduler-audience:latest
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/youtube-intelligence/backend:$BUILD_ID

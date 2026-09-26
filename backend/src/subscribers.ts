@@ -48,16 +48,15 @@ export async function unsubscribeTelegramUser(chatId: string) {
   );
 }
 
-export async function getAnalysisRecipientChatIds(adminChatId: string) {
+export async function getActiveSubscriberChatIds() {
   const snapshot = await db
     .collection("telegramSubscribers")
     .where("active", "==", true)
     .get();
   return [
-    ...new Set([
-      adminChatId,
-      ...snapshot.docs.map((document) => String(document.get("chatId"))),
-    ]),
+    ...new Set(
+      snapshot.docs.map((document) => String(document.get("chatId"))),
+    ),
   ].filter(Boolean);
 }
 

@@ -27,6 +27,8 @@ const updateSchema = z.object({
     .optional(),
 });
 
+type TelegramMessage = NonNullable<z.infer<typeof updateSchema>["message"]>;
+
 export const telegramRouter = Router();
 
 telegramRouter.post("/webhook", async (request, response) => {
@@ -40,7 +42,7 @@ telegramRouter.post("/webhook", async (request, response) => {
   }
 
   const { message } = updateSchema.parse(request.body);
-  if (!message?.text) {
+  if (!shouldHandleTelegramMessage(message)) {
     response.json({ ok: true });
     return;
   }
@@ -80,6 +82,12 @@ telegramRouter.post("/webhook", async (request, response) => {
     response.json({ ok: true });
   }
 });
+
+export function shouldHandleTelegramMessage(
+  message: z.infer<typeof updateSchema>["message"],
+): message is TelegramMessage & { text: string; chat: { type: "private" } } {
+  return Boolean(message?.text && message.chat.type === "private");
+}
 
 export function createWelcomeMessage(channelNames: string[]) {
   const channelList = channelNames.length

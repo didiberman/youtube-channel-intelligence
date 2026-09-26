@@ -3,6 +3,8 @@ export interface VideoSummary {
   title: string;
   publishedAt: string;
   url: string;
+  durationSeconds?: number;
+  isShort?: boolean;
 }
 
 export type AiProvider = "openrouter";
@@ -30,6 +32,7 @@ export interface GlobalSettings {
   model: string;
   prompt: string;
   telegramChatId: string;
+  telegramMessageThreadId?: number;
 }
 
 export interface TelegramSubscriber {

@@ -2,8 +2,8 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { analyzeTranscript } from "./analysis.js";
 import { config } from "./config.js";
 import { db } from "./firebase.js";
-import { sendAnalysis } from "./telegram.js";
-import { getAnalysisRecipientChatIds } from "./subscribers.js";
+import { sendAnalysis, sendTelegramText } from "./telegram.js";
+import { getActiveSubscriberChatIds } from "./subscribers.js";
 import { scheduleTranscriptRetry } from "./tasks.js";
 import type { Channel, GlobalSettings, Video } from "./types.js";
 import {
@@ -18,6 +18,8 @@ export interface PollResult {
   waiting: number;
   failed: number;
 }
+
+export const maxTranscriptAttempts = 5;
 
 export async function pollChannels(): Promise<PollResult> {
   const [snapshot, settings] = await Promise.all([
@@ -58,6 +60,7 @@ export function videosAfterBaseline(feed: Video[], baseline?: Video) {
   return feed
     .filter(
       (video) =>
+        !video.isShort &&
         video.videoId !== baseline.videoId &&
         new Date(video.publishedAt).getTime() > baselineTime,
     )
@@ -94,6 +97,7 @@ export async function rerunLatestVideo(
     .set(
       {
         status: "rerun_requested",
+        transcriptAttemptCount: 0,
         rerunRequestedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       },
@@ -107,45 +111,114 @@ export async function rerunLatestVideo(
   );
 }
 
+export async function sendLatestVideoToConfiguredThread(
+  channelDocumentId: string,
+  channel: Channel,
+  video: Video,
+) {
+  if (video.isShort) return "skipped";
+
+  const settings = await getGlobalSettings();
+  if (!settings.telegramMessageThreadId) {
+    throw new Error("Global Telegram topic ID is not configured");
+  }
+
+  const processReference = db
+    .collection("channels")
+    .doc(channelDocumentId)
+    .collection("videos")
+    .doc(video.videoId);
+  const snapshot = await processReference.get();
+  let analysis =
+    snapshot.exists && snapshot.get("analysis")
+      ? String(snapshot.get("analysis"))
+      : "";
+
+  if (!analysis) {
+    const transcript = await getTranscript(video.videoId);
+    analysis = await analyzeTranscript({
+      provider: settings.provider,
+      model: settings.model,
+      prompt: settings.prompt,
+      transcript,
+      video,
+      channelTitle: channel.title,
+    });
+    await processReference.set(
+      {
+        ...video,
+        status: "completed",
+        transcriptCharacters: transcript.length,
+        analysis,
+        backfilledAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+
+  await sendAnalysis({
+    chatId: settings.telegramChatId,
+    messageThreadId: settings.telegramMessageThreadId,
+    channelTitle: channel.title,
+    video,
+    analysis,
+  });
+  await processReference.set(
+    {
+      telegramThreadBackfilledAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return "sent";
+}
+
 async function processVideo(
   channelDocumentId: string,
   channel: Channel,
   video: Video,
   settings: GlobalSettings,
 ): Promise<"processed" | "waiting" | "failed" | "skipped"> {
+  if (video.isShort) return "skipped";
+
   const processReference = db
     .collection("channels")
     .doc(channelDocumentId)
     .collection("videos")
     .doc(video.videoId);
 
-  const shouldProcess = await db.runTransaction(async (transaction) => {
+  const transcriptAttempt = await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(processReference);
     if (existing.exists) {
       const status = existing.get("status");
       if (
         status === "completed" ||
         status === "processing" ||
-        status === "waiting_transcript"
+        status === "waiting_transcript" ||
+        status === "transcript_unavailable"
       ) {
-        return false;
+        return null;
       }
     }
+    const transcriptAttemptCount =
+      Number(existing.get("transcriptAttemptCount") || 0) + 1;
     transaction.set(
       processReference,
       {
         ...video,
         status: "processing",
         attemptCount: FieldValue.increment(1),
+        transcriptAttemptCount,
         startedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },
     );
-    return true;
+    return transcriptAttemptCount;
   });
 
-  if (!shouldProcess) return "skipped";
+  if (transcriptAttempt === null) return "skipped";
 
   try {
     const transcript = await getTranscript(video.videoId);
@@ -157,11 +230,24 @@ async function processVideo(
       video,
       channelTitle: channel.title,
     });
-    const recipients = await getAnalysisRecipientChatIds(settings.telegramChatId);
+    const subscriberChatIds = await getActiveSubscriberChatIds();
+    const recipients: Array<{
+      chatId: string;
+      messageThreadId?: number;
+    }> = [
+      {
+        chatId: settings.telegramChatId,
+        messageThreadId: settings.telegramMessageThreadId,
+      },
+      ...subscriberChatIds
+        .filter((chatId) => chatId !== settings.telegramChatId)
+        .map((chatId) => ({ chatId })),
+    ];
     const deliveries = await Promise.allSettled(
-      recipients.map((chatId) =>
+      recipients.map(({ chatId, messageThreadId }) =>
         sendAnalysis({
           chatId,
+          messageThreadId,
           channelTitle: channel.title,
           video,
           analysis,
@@ -177,7 +263,7 @@ async function processVideo(
     deliveries.forEach((delivery, index) => {
       if (delivery.status === "rejected") {
         console.error("Telegram subscriber delivery failed", {
-          chatId: recipients[index],
+          chatId: recipients[index]?.chatId,
           error: getError(delivery.reason),
         });
       }
@@ -210,31 +296,42 @@ async function processVideo(
     return "processed";
   } catch (error) {
     if (error instanceof TranscriptUnavailableError) {
-      try {
-        const retryAt = await scheduleTranscriptRetry(
-          channelDocumentId,
-          video.videoId,
-        );
-        await processReference.set(
-          {
-            status: "waiting_transcript",
-            error: error.message,
-            retryAt,
-            updatedAt: FieldValue.serverTimestamp(),
-          },
-          { merge: true },
-        );
-        return "waiting";
-      } catch (schedulingError) {
-        error = new Error(
-          `Captions unavailable and retry scheduling failed: ${getError(schedulingError)}`,
+      if (shouldRetryTranscript(transcriptAttempt)) {
+        try {
+          const retryAt = await scheduleTranscriptRetry(
+            channelDocumentId,
+            video.videoId,
+          );
+          await processReference.set(
+            {
+              status: "waiting_transcript",
+              error: error.message,
+              retryAt,
+              transcriptAttemptsRemaining:
+                maxTranscriptAttempts - transcriptAttempt,
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+          return "waiting";
+        } catch (schedulingError) {
+          error = new Error(
+            `Captions unavailable and retry scheduling failed: ${getError(schedulingError)}`,
+          );
+        }
+      } else {
+        error = new TranscriptRetryExhaustedError(
+          `Captions unavailable after ${maxTranscriptAttempts} attempts: ${error.message}`,
         );
       }
     }
     const message = getError(error);
     await processReference.set(
       {
-        status: "failed",
+        status:
+          error instanceof TranscriptRetryExhaustedError
+            ? "transcript_unavailable"
+            : "failed",
         error: message,
         failedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
@@ -254,8 +351,58 @@ async function processVideo(
       videoId: video.videoId,
       error: message,
     });
+    if (
+      !(error instanceof TranscriptUnavailableError) &&
+      !(error instanceof TranscriptRetryExhaustedError)
+    ) {
+      try {
+        await sendTelegramText(
+          settings.telegramChatId,
+          `⚠️ Video processing failed for "${video.title}" (${channel.title}): ${message}`,
+        );
+      } catch (alertError) {
+        console.error("Failed to send Telegram failure alert", {
+          error: getError(alertError),
+        });
+      }
+    }
     return "failed";
   }
+}
+
+export function shouldRetryTranscript(transcriptAttempt: number) {
+  return transcriptAttempt < maxTranscriptAttempts;
+}
+
+class TranscriptRetryExhaustedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TranscriptRetryExhaustedError";
+  }
+}
+
+export async function retryAllFailedTranscripts() {
+  const channelsSnapshot = await db.collection("channels").get();
+  const result = { retried: 0, processed: 0, stillFailing: 0 };
+
+  for (const channelDocument of channelsSnapshot.docs) {
+    const videosSnapshot = await channelDocument.ref
+      .collection("videos")
+      .where("status", "in", ["failed", "transcript_unavailable"])
+      .get();
+
+    for (const videoDocument of videosSnapshot.docs) {
+      result.retried += 1;
+      const outcome = await retryTranscript(channelDocument.id, videoDocument.id);
+      if (outcome === "processed") {
+        result.processed += 1;
+      } else if (outcome === "failed") {
+        result.stillFailing += 1;
+      }
+    }
+  }
+
+  return result;
 }
 
 export async function retryTranscript(channelId: string, videoId: string) {
@@ -289,6 +436,8 @@ export async function retryTranscript(channelId: string, videoId: string) {
       title: videoData.title,
       publishedAt: videoData.publishedAt,
       url: videoData.url,
+      durationSeconds: videoData.durationSeconds,
+      isShort: videoData.isShort,
     },
     await getGlobalSettings(),
   );
@@ -302,15 +451,14 @@ async function getGlobalSettings(): Promise<GlobalSettings> {
   const snapshot = await db.collection("settings").doc("global").get();
   const provider = "openrouter";
   const model =
-    snapshot.exists &&
-    config.models.openrouter.includes(String(snapshot.get("model")))
+    (snapshot.exists && snapshot.get("model")
       ? String(snapshot.get("model"))
-      : config.models.openrouter[0] || "";
+      : config.models.openrouter[0]) || "anthropic/claude-sonnet-4.6";
   const telegramChatId =
     snapshot.exists && snapshot.get("telegramChatId")
       ? String(snapshot.get("telegramChatId"))
       : "";
-  if (!model || !config.models.openrouter.includes(model)) {
+  if (!model) {
     throw new Error("Global AI model is not configured");
   }
   if (!telegramChatId) {
@@ -324,5 +472,9 @@ async function getGlobalSettings(): Promise<GlobalSettings> {
     provider,
     model,
     telegramChatId,
+    telegramMessageThreadId:
+      snapshot.exists && snapshot.get("telegramMessageThreadId")
+        ? Number(snapshot.get("telegramMessageThreadId"))
+        : undefined,
   };
 }

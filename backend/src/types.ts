@@ -3,6 +3,8 @@ export interface Video {
   title: string;
   publishedAt: string;
   url: string;
+  durationSeconds?: number;
+  isShort?: boolean;
 }
 
 export interface Channel {
@@ -22,6 +24,7 @@ export interface GlobalSettings {
   provider: AiProvider;
   model: string;
   telegramChatId: string;
+  telegramMessageThreadId?: number;
 }
 
 export interface TelegramSubscriber {

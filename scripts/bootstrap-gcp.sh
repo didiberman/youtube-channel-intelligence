@@ -41,7 +41,12 @@ gcloud tasks queues describe transcript-retries \
   gcloud tasks queues create transcript-retries \
     --location="${REGION}" \
     --max-concurrent-dispatches=2 \
-    --max-attempts=1
+    --max-attempts=5
+
+gcloud tasks queues update transcript-retries \
+  --location="${REGION}" \
+  --max-concurrent-dispatches=2 \
+  --max-attempts=5
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${RUNTIME_SA}" \

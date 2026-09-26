@@ -8,7 +8,9 @@ import {
   pollChannels,
   processLatestVideo,
   rerunLatestVideo,
+  retryAllFailedTranscripts,
   retryTranscript,
+  sendLatestVideoToConfiguredThread,
 } from "./pipeline.js";
 import type { Channel } from "./types.js";
 import { getChannelFeed, resolveChannel } from "./youtube.js";
@@ -48,16 +50,11 @@ apiRouter.put("/settings", requireUser, async (request, response) => {
     .object({
       prompt: z.string().trim().min(10).max(20_000),
       provider: providerSchema,
-      model: z.string().trim().min(2).max(100),
+      model: z.string().trim().min(2).max(200),
       telegramChatId: z.string().trim().min(2).max(100),
+      telegramMessageThreadId: z.number().int().positive().optional(),
     })
     .parse(request.body);
-  if (!config.models[input.provider].includes(input.model)) {
-    response.status(400).json({
-      error: `Selected model is not allowed for ${input.provider}`,
-    });
-    return;
-  }
   await db.collection("settings").doc("global").set(
     {
       ...input,
@@ -108,7 +105,8 @@ apiRouter.post("/channels", requireUser, async (request, response) => {
 
   const resolved = await resolveChannel(input.source);
   const feed = await getChannelFeed(resolved.channelId);
-  const latestVideo = feed[0];
+  const latestVideo = feed.find((video) => !video.isShort);
+  const latestFeedVideo = feed[0];
   const reference = db.collection("channels").doc(resolved.channelId);
   const existing = await reference.get();
   if (existing.exists) {
@@ -120,7 +118,7 @@ apiRouter.post("/channels", requireUser, async (request, response) => {
     ...resolved,
     sourceInput: input.source,
     active: true,
-    lastSeenVideo: latestVideo,
+    lastSeenVideo: latestFeedVideo,
     createdBy: request.user?.uid || "unknown",
   };
   await reference.set({
@@ -169,7 +167,9 @@ apiRouter.post("/channels/:id/rerun", requireUser, async (request, response) => 
   }
 
   const channel = snapshot.data() as Channel;
-  const latestVideo = (await getChannelFeed(channel.channelId))[0];
+  const latestVideo = (await getChannelFeed(channel.channelId)).find(
+    (video) => !video.isShort,
+  );
   if (!latestVideo) {
     response.status(404).json({ error: "No videos found for this channel" });
     return;
@@ -183,6 +183,40 @@ apiRouter.post("/channels/:id/rerun", requireUser, async (request, response) => 
   });
 });
 
+apiRouter.post(
+  "/channels/:id/backfill-thread",
+  requireUser,
+  async (request, response) => {
+    const channelId = routeParameter(request.params.id);
+    const reference = db.collection("channels").doc(channelId);
+    const snapshot = await reference.get();
+    if (!snapshot.exists) {
+      response.status(404).json({ error: "Channel not found" });
+      return;
+    }
+
+    const channel = snapshot.data() as Channel;
+    const latestVideo = (await getChannelFeed(channel.channelId)).find(
+      (video) => !video.isShort,
+    );
+    if (!latestVideo) {
+      response.status(404).json({
+        error: "No non-Short videos found for this channel",
+      });
+      return;
+    }
+
+    response.json({
+      outcome: await sendLatestVideoToConfiguredThread(
+        channelId,
+        channel,
+        latestVideo,
+      ),
+      video: latestVideo,
+    });
+  },
+);
+
 apiRouter.delete("/channels/:id", requireUser, async (request, response) => {
   await db.recursiveDelete(
     db.collection("channels").doc(routeParameter(request.params.id)),
@@ -194,10 +228,21 @@ apiRouter.post("/poll", requireUser, async (_request, response) => {
   response.json(await pollChannels());
 });
 
+apiRouter.post("/retry-failed", requireUser, async (_request, response) => {
+  response.json(await retryAllFailedTranscripts());
+});
+
 export const internalRouter = Router();
 internalRouter.post("/poll", requireScheduler, async (_request, response) => {
   response.json(await pollChannels());
 });
+internalRouter.post(
+  "/retry-failed",
+  requireScheduler,
+  async (_request, response) => {
+    response.json(await retryAllFailedTranscripts());
+  },
+);
 internalRouter.post("/retry", requireScheduler, async (request, response) => {
   const input = z
     .object({
@@ -231,10 +276,9 @@ async function getGlobalSettings() {
   const snapshot = await db.collection("settings").doc("global").get();
   const provider = "openrouter";
   const model =
-    (snapshot.exists &&
-    config.models.openrouter.includes(String(snapshot.get("model")))
+    (snapshot.exists && snapshot.get("model")
       ? String(snapshot.get("model"))
-      : config.models.openrouter[0]) || "";
+      : config.models.openrouter[0]) || "anthropic/claude-sonnet-4.6";
   return {
     prompt:
       (snapshot.exists ? snapshot.get("prompt") : undefined) ||
@@ -243,5 +287,9 @@ async function getGlobalSettings() {
     model,
     telegramChatId:
       (snapshot.exists ? snapshot.get("telegramChatId") : undefined) || "",
+    telegramMessageThreadId:
+      (snapshot.exists
+        ? snapshot.get("telegramMessageThreadId")
+        : undefined) || undefined,
   };
 }

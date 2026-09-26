@@ -5,7 +5,7 @@ export const config = {
   projectId: process.env.GOOGLE_CLOUD_PROJECT || "didiberman",
   location: process.env.GOOGLE_CLOUD_LOCATION || "global",
   youtubeApiKey: process.env.YOUTUBE_API_KEY || "",
-  supadataApiKey: process.env.SUPADATA_API_KEY || "",
+  apifyApiKey: process.env.APIFY_API_KEY || "",
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
   telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || "",
   telegramSubscribePassword: process.env.TELEGRAM_SUBSCRIBE_PASSWORD || "",

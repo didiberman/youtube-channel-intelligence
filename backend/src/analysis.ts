@@ -16,8 +16,8 @@ export async function analyzeTranscript({
   video: Video;
   channelTitle: string;
 }) {
-  if (!config.models[provider]?.includes(model)) {
-    throw new Error(`Model "${model}" is not allowed for ${provider}`);
+  if (!model?.trim()) {
+    throw new Error(`Model is required for ${provider}`);
   }
   if (!config.openRouterApiKey) {
     throw new Error("OPENROUTER_API_KEY is not configured");

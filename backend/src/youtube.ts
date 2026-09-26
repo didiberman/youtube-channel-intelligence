@@ -62,7 +62,7 @@ export async function getChannelFeed(channelId: string): Promise<Video[]> {
   };
   const entries = arrayOf<Record<string, unknown>>(parsed.feed?.entry);
 
-  return entries
+  const videos = entries
     .map((entry) => {
       const videoId = String(entry["yt:videoId"] || "");
       const link = arrayOf<Record<string, unknown>>(entry.link).find(
@@ -83,41 +83,46 @@ export async function getChannelFeed(channelId: string): Promise<Video[]> {
         new Date(right.publishedAt).getTime() -
         new Date(left.publishedAt).getTime(),
     );
+
+  const details = await getVideoDurations(videos.map((video) => video.videoId));
+  return videos.map((video) => {
+    const durationSeconds = details.get(video.videoId);
+    return {
+      ...video,
+      durationSeconds,
+      isShort: durationSeconds === undefined || isShortDuration(durationSeconds),
+    };
+  });
+}
+
+export function isShortDuration(durationSeconds: number) {
+  return durationSeconds <= 180;
 }
 
 export async function getTranscript(videoId: string): Promise<string> {
-  if (!config.supadataApiKey) {
-    throw new Error("SUPADATA_API_KEY is not configured");
+  if (!config.apifyApiKey) {
+    throw new Error("APIFY_API_KEY is not configured");
   }
 
-  const url = new URL("https://api.supadata.ai/v1/transcript");
-  url.searchParams.set(
-    "url",
-    `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+  const url = new URL(
+    "https://api.apify.com/v2/acts/pintostudio~youtube-transcript-scraper/run-sync-get-dataset-items",
   );
-  url.searchParams.set("text", "true");
-  url.searchParams.set("mode", "native");
+  url.searchParams.set("token", config.apifyApiKey);
 
   const response = await fetch(url, {
-    headers: { "x-api-key": config.supadataApiKey },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      videoUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+      targetLanguage: "en",
+    }),
     signal: AbortSignal.timeout(90_000),
   });
-  const payload = (await response.json().catch(() => ({}))) as SupadataResponse;
-
-  if (response.status === 206 || payload.error?.error === "transcript-unavailable") {
-    throw new TranscriptUnavailableError(
-      payload.error?.message || "Captions are not available yet",
-    );
-  }
-  if (response.status === 202 && payload.jobId) {
-    return waitForSupadataJob(payload.jobId);
-  }
   if (!response.ok) {
-    throw new Error(
-      payload.error?.message || `Supadata returned ${response.status}`,
-    );
+    throw new Error(`Apify returned ${response.status}`);
   }
-  return transcriptContent(payload.content);
+  const items = (await response.json().catch(() => [])) as ApifyTranscriptItem[];
+  return transcriptContent(items[0]?.data);
 }
 
 function parseChannelInput(
@@ -201,20 +206,45 @@ async function youtubeRequest<T>(
   return body;
 }
 
+async function getVideoDurations(videoIds: string[]) {
+  if (!videoIds.length) return new Map<string, number>();
+  const result = await youtubeRequest<{
+    items?: Array<{
+      id?: string;
+      contentDetails?: { duration?: string };
+    }>;
+  }>("/videos", {
+    part: "contentDetails",
+    id: videoIds.join(","),
+  });
+  return new Map(
+    (result.items || []).flatMap((item) => {
+      if (!item.id || !item.contentDetails?.duration) return [];
+      return [[item.id, parseIsoDuration(item.contentDetails.duration)] as const];
+    }),
+  );
+}
+
+function parseIsoDuration(value: string) {
+  const match = value.match(
+    /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/,
+  );
+  if (!match) return 0;
+  return (
+    Number(match[1] || 0) * 86_400 +
+    Number(match[2] || 0) * 3_600 +
+    Number(match[3] || 0) * 60 +
+    Number(match[4] || 0)
+  );
+}
+
 function arrayOf<T>(value: unknown): T[] {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? (value as T[]) : [value as T];
 }
 
-interface SupadataResponse {
-  jobId?: string;
-  status?: "queued" | "active" | "completed" | "failed";
-  content?: string | Array<{ text?: string }>;
-  error?: {
-    error?: string;
-    message?: string;
-    details?: string;
-  };
+interface ApifyTranscriptItem {
+  data?: Array<{ text?: string }>;
 }
 
 export class TranscriptUnavailableError extends Error {
@@ -224,56 +254,11 @@ export class TranscriptUnavailableError extends Error {
   }
 }
 
-async function waitForSupadataJob(jobId: string): Promise<string> {
-  const deadline = Date.now() + 5 * 60_000;
-  while (Date.now() < deadline) {
-    await sleep(1_000);
-    const response = await fetch(
-      `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,
-      {
-        headers: { "x-api-key": config.supadataApiKey },
-        signal: AbortSignal.timeout(20_000),
-      },
-    );
-    const payload = (await response.json().catch(() => ({}))) as SupadataResponse;
-    if (!response.ok) {
-      throw new Error(
-        payload.error?.message || `Supadata job returned ${response.status}`,
-      );
-    }
-    if (payload.status === "completed") {
-      return transcriptContent(payload.content);
-    }
-    if (payload.status === "failed") {
-      if (payload.error?.error === "transcript-unavailable") {
-        throw new TranscriptUnavailableError(
-          payload.error.message || "Captions are not available yet",
-        );
-      }
-      throw new Error(
-        payload.error?.message ||
-          payload.error?.details ||
-          "Supadata transcript job failed",
-      );
-    }
-  }
-  throw new Error("Supadata transcript job timed out");
-}
-
-function transcriptContent(
-  content: SupadataResponse["content"],
-): string {
-  const transcript =
-    typeof content === "string"
-      ? content
-      : (content || []).map((segment) => segment.text || "").join(" ");
+function transcriptContent(segments: ApifyTranscriptItem["data"]): string {
+  const transcript = (segments || []).map((segment) => segment.text || "").join(" ");
   const normalized = transcript.replace(/\s+/g, " ").trim();
   if (!normalized) {
-    throw new TranscriptUnavailableError("Supadata returned an empty transcript");
+    throw new TranscriptUnavailableError("Apify returned an empty transcript");
   }
   return normalized;
-}
-
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

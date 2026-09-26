@@ -19,7 +19,6 @@ import type {
   Channel,
   ChannelInput,
   GlobalSettings,
-  ModelOptions,
   TelegramSubscriber,
 } from "./types";
 
@@ -30,14 +29,12 @@ function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(getSessionToken()));
   const [channels, setChannels] = useState<Channel[]>([]);
   const [subscribers, setSubscribers] = useState<TelegramSubscriber[]>([]);
-  const [models, setModels] = useState<ModelOptions>({
-    openrouter: ["anthropic/claude-sonnet-4.6"],
-  });
   const [settings, setSettings] = useState<GlobalSettings>({
     provider: "openrouter",
     model: "anthropic/claude-sonnet-4.6",
     prompt: fallbackPrompt,
     telegramChatId: "",
+    telegramMessageThreadId: undefined,
   });
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
@@ -58,7 +55,6 @@ function App() {
         api.listChannels(),
         api.listSubscribers(),
       ]);
-      setModels(config.models);
       setSettings(config.settings);
       setChannels(channelData.channels);
       setSubscribers(subscriberData.subscribers);
@@ -225,7 +221,6 @@ function App() {
         {message && <div className="notice success">{message}</div>}
 
         <GlobalSettingsForm
-          models={models}
           settings={settings}
           onSave={updateGlobalSettings}
         />
@@ -450,11 +445,9 @@ function ChannelForm({
 }
 
 function GlobalSettingsForm({
-  models,
   settings,
   onSave,
 }: {
-  models: ModelOptions;
   settings: GlobalSettings;
   onSave: (settings: GlobalSettings) => Promise<void>;
 }) {
@@ -463,14 +456,6 @@ function GlobalSettingsForm({
   const [error, setError] = useState("");
 
   useEffect(() => setValue(settings), [settings]);
-  useEffect(() => {
-    if (!models[value.provider].includes(value.model)) {
-      setValue((current) => ({
-        ...current,
-        model: models[current.provider][0] || "",
-      }));
-    }
-  }, [models, value.model, value.provider]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -498,7 +483,9 @@ function GlobalSettingsForm({
       </div>
       <label>
         OpenRouter model
-        <select
+        <input
+          required
+          placeholder="e.g. anthropic/claude-sonnet-4.6"
           value={value.model}
           onChange={(event) =>
             setValue((current) => ({
@@ -507,13 +494,7 @@ function GlobalSettingsForm({
               model: event.target.value,
             }))
           }
-        >
-          {models.openrouter.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
+        />
       </label>
       <label>
         Prompt
@@ -538,6 +519,23 @@ function GlobalSettingsForm({
             setValue((current) => ({
               ...current,
               telegramChatId: event.target.value,
+            }))
+          }
+        />
+      </label>
+      <label>
+        Telegram topic ID
+        <input
+          type="number"
+          min="1"
+          placeholder="Optional message thread ID"
+          value={value.telegramMessageThreadId ?? ""}
+          onChange={(event) =>
+            setValue((current) => ({
+              ...current,
+              telegramMessageThreadId: event.target.value
+                ? Number(event.target.value)
+                : undefined,
             }))
           }
         />
@@ -713,7 +711,8 @@ function sameSettings(left: GlobalSettings, right: GlobalSettings) {
     left.provider === right.provider &&
     left.model === right.model &&
     left.prompt === right.prompt &&
-    left.telegramChatId === right.telegramChatId
+    left.telegramChatId === right.telegramChatId &&
+    left.telegramMessageThreadId === right.telegramMessageThreadId
   );
 }
 

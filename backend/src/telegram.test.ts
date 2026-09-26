@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { markdownToTelegramHtml } from "./telegram.js";
+import {
+  createTelegramMessageTarget,
+  markdownToTelegramHtml,
+} from "./telegram.js";
 
 test("converts common Markdown to Telegram HTML", () => {
   const result = markdownToTelegramHtml(
@@ -18,4 +21,17 @@ test("escapes unsupported HTML from model output", () => {
     markdownToTelegramHtml("<script>alert('x')</script>"),
     "&lt;script&gt;alert('x')&lt;/script&gt;",
   );
+});
+
+test("targets a configured Telegram channel topic", () => {
+  assert.deepEqual(
+    createTelegramMessageTarget("-1002002750053", 7831),
+    {
+      chat_id: "-1002002750053",
+      message_thread_id: 7831,
+    },
+  );
+  assert.deepEqual(createTelegramMessageTarget("12345"), {
+    chat_id: "12345",
+  });
 });

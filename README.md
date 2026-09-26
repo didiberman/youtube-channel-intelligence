@@ -222,6 +222,13 @@ Before publishing a fork, run a secret scanner and inspect `git diff --cached`.
 
 - Prefer channel IDs, `@handles`, or canonical URLs to conserve YouTube search
   quota.
+- Videos of three minutes or less are treated as Shorts and never analyzed.
+- Unavailable transcripts are retried four times after the initial attempt,
+  with two hours between application-level attempts.
+- Set the Telegram chat ID to the destination channel and the optional topic ID
+  to its message thread ID. Subscriber reports continue to be sent directly.
+- `POST /api/channels/:id/backfill-thread` sends a channel's latest non-Short
+  report only to the configured Telegram topic.
 - The backend uses a single Cloud Run container because all routes share the
   same Firestore, YouTube, caption, analysis, and Telegram modules.
 - Cloud Run has zero minimum instances and a configured maximum of three.

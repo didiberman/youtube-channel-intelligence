@@ -5,11 +5,13 @@ const maxTelegramLength = 4000;
 
 export async function sendAnalysis({
   chatId,
+  messageThreadId,
   channelTitle,
   video,
   analysis,
 }: {
   chatId: string;
+  messageThreadId?: number;
   channelTitle: string;
   video: Video;
   analysis: string;
@@ -33,7 +35,7 @@ export async function sendAnalysis({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chat_id: chatId,
+          ...createTelegramMessageTarget(chatId, messageThreadId),
           text,
           parse_mode: "HTML",
           disable_web_page_preview: true,
@@ -49,6 +51,16 @@ export async function sendAnalysis({
       throw new Error(body.description || `Telegram returned ${response.status}`);
     }
   }
+}
+
+export function createTelegramMessageTarget(
+  chatId: string,
+  messageThreadId?: number,
+) {
+  return {
+    chat_id: chatId,
+    ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+  };
 }
 
 export async function sendTelegramText(chatId: string, text: string) {
