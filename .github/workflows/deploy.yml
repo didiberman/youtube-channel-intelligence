@@ -1,0 +1,237 @@
+name: CI/CD Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+  GCP_PROJECT_ID: didiberman
+  GCP_REGION: europe-west1
+  CLOUD_RUN_SERVICE: youtube-channel-intelligence
+  ARTIFACT_REPO: youtube-intelligence
+  WIF_PROVIDER: projects/614527126441/locations/global/workloadIdentityPools/github-actions/providers/github
+  WIF_SERVICE_ACCOUNT: github-actions-deploy@didiberman.iam.gserviceaccount.com
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      firestore: ${{ steps.filter.outputs.firestore }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter Paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.github/workflows/deploy.yml'
+            frontend:
+              - 'frontend/**'
+              - 'firebase.json'
+              - '.firebaserc'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.github/workflows/deploy.yml'
+            firestore:
+              - 'firestore.rules'
+              - 'firestore.indexes.json'
+
+  backend-test:
+    name: Backend Typecheck, Test & Build
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck backend
+        run: npm run typecheck --workspace backend
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build backend
+        run: npm run build --workspace backend
+
+  frontend-test:
+    name: Frontend Typecheck & Build
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck --workspace frontend
+
+      - name: Build frontend
+        run: npm run build --workspace frontend
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  deploy-backend:
+    name: Deploy Backend to Cloud Run
+    needs: [detect-changes, backend-test]
+    if: >
+      always() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      (needs.detect-changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.backend-test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup GCP Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}"
+          docker build -f backend/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}"
+          gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
+            --image="$IMAGE" \
+            --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances=3 \
+            --concurrency=10 \
+            --timeout=3600 \
+            --cpu=1 \
+            --memory=1Gi \
+            --service-account=youtube-monitor-runtime@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
+            --update-env-vars="GOOGLE_CLOUD_PROJECT=${{ env.GCP_PROJECT_ID }},SCHEDULER_SERVICE_ACCOUNT=youtube-monitor-scheduler@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com,TASKS_QUEUE=transcript-retries,TASKS_LOCATION=${{ env.GCP_REGION }}"
+
+  deploy-hosting:
+    name: Deploy Frontend to Firebase Hosting
+    needs: [detect-changes, frontend-test]
+    if: >
+      always() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      (needs.detect-changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.frontend-test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Authenticate to GCP via OIDC
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Deploy Firebase Hosting
+        run: npx firebase-tools deploy --only hosting --project ${{ env.GCP_PROJECT_ID }} --force --non-interactive
+        env:
+          FIREBASE_TOKEN: ${{ steps.auth.outputs.access_token }}
+
+  deploy-firestore:
+    name: Deploy Firestore Rules
+    needs: detect-changes
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.detect-changes.outputs.firestore == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Authenticate to GCP via OIDC
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Deploy Firestore Rules & Indexes
+        run: npx firebase-tools deploy --only firestore --project ${{ env.GCP_PROJECT_ID }} --force --non-interactive
+        env:
+          FIREBASE_TOKEN: ${{ steps.auth.outputs.access_token }}
