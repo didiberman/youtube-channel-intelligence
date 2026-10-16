@@ -27,11 +27,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
 
+  const refreshedToken = response.headers.get("x-refreshed-token");
+  if (refreshedToken) {
+    localStorage.setItem(sessionStorageKey, refreshedToken);
+  }
+
   const payload = (await response.json().catch(() => ({}))) as {
     error?: string;
   };
 
   if (!response.ok) {
+    if (response.status === 401 && path !== "/login") {
+      clearSessionToken();
+      throw new Error(`${payload.error || "Session expired"} (401)`);
+    }
     throw new Error(payload.error || `Request failed with ${response.status}`);
   }
 

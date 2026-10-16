@@ -15,6 +15,8 @@ declare global {
 
 const oauthClient = new OAuth2Client();
 
+const SESSION_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
+
 export async function requireUser(
   request: Request,
   response: Response,
@@ -38,6 +40,7 @@ export async function requireUser(
     return;
   }
   request.user = { uid: session.uid };
+  response.setHeader("X-Refreshed-Token", createSessionToken(session.uid));
   next();
 }
 
@@ -99,7 +102,7 @@ function createSessionToken(uid: string) {
   const payload = Buffer.from(
     JSON.stringify({
       uid,
-      exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+      exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
       nonce: randomUUID(),
     }),
   ).toString("base64url");
